@@ -15,6 +15,22 @@ import matplotlib.pyplot as plt
 import scipy.optimize as sc
 import pandas_market_calendars as mcal
 
+#make folder for storing the efficient frontier plots
+if not os.path.exists('plots'):
+    os.makedirs('plots')
+
+#make folder for storing constructed portfolios
+if not os.path.exists('portfolios'):
+    os.makedirs('portfolios')
+
+#make folder for storing the backtest results
+if not os.path.exists('backtest_results'):
+    os.makedirs('backtest_results')
+
+#make folder for storing the trade log
+if not os.path.exists('trade_log'):
+    os.makedirs('trade_log')
+
 
 warnings.filterwarnings("ignore", category=pd.errors.SettingWithCopyWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -44,6 +60,13 @@ print('Connected to Kite API successfully!')
 instrument_dump = kite.instruments()   # get instruments dump from NSE
 instrument_df = pd.DataFrame(instrument_dump)  # dump it to a dataframe
 # print(instrument_df.columns)
+
+#connect to the mongo db
+client = pymongo.MongoClient("mongodb://localhost:27017/")
+db = client["wealth_wave"]
+collection = db["monthly_portfolio"]
+collection2 = db["backtest_results"]     
+
 
 #get next trading day
 def get_next_trading_day(date):
@@ -508,9 +531,8 @@ def efficient_frontier(final_list, covariance_matrix,date):
     plt.xlabel('Volatility (Std. Deviation)')
     plt.ylabel('Expected Returns')
     plt.title('Efficient Frontier')
-    #save the plot to a file with name 'Efficient_Frontier_{date}.png'
-    plt.savefig(f'Efficient_Frontier_{date}.png')
-    plt.show()
+    #save the plot to a file with name 'Efficient_Frontier_{date}.png' in plots folder
+    plt.savefig(f'plots/Efficient_Frontier_{date}.png')
 
     print('Efficient frontier created successfully!\n')
 
@@ -548,7 +570,6 @@ def calculate_results(returns,covariance):
     print('Results calculated successfully!\n')
 
     return maxSR_portfolio_weights, maxSR_portfolio_returns, maxSR_portfolio_risk
-
 
 def wealth_wave_make_portfolio(date,final_env):
     print(f'Computing final score for the environment for {date}...\n')
@@ -619,6 +640,15 @@ def wealth_wave_make_portfolio(date,final_env):
     final_list['maxSR_portfolio_weights']=maxSR_portfolio_weights
 
     print(final_list)
+    #save the final list to a csv file in portfolios folder
+    final_list.to_csv(f'portfolios/final_list_{date}.csv')
+
+    #push the data to the mongo db
+    #make dictionary of the final list
+    final_list_dict=final_list.to_dict()
+    row_mongo={'date':date,'final_list':final_list_dict,'maxSR_portfolio_returns':maxSR_portfolio_returns,'maxSR_portfolio_risk':maxSR_portfolio_risk}
+    #add the row to the mongo db
+    collection.insert_one(row_mongo)
 
     #select the stocks with maxSR_portfolio_weights
     maxSR_portfolio_stocks=final_list[final_list['maxSR_portfolio_weights']>0]
@@ -626,11 +656,10 @@ def wealth_wave_make_portfolio(date,final_env):
 
     return maxSR_portfolio_stocks
 
-def backtest_portfolio(maxSR_portfolio_stocks):
+def backtest_portfolio(maxSR_portfolio_stocks,date):
 
     print('backtesting the portfolio for next one month...\n') 
     #buy stock on nexr trading day of date
-    date='2024-01-01'
     date = datetime.strptime(date, '%Y-%m-%d')
     next_date = get_next_trading_day(date)
     next_date = next_date.strftime('%Y-%m-%d')  
@@ -665,6 +694,19 @@ def backtest_portfolio(maxSR_portfolio_stocks):
     #multiply the returns with the weights
     returns_df['weighted_return']=returns_df['one_month_return']*returns_df['weight']
     returns_df['weighted_return']=returns_df['weighted_return']*100
+
+    #get date in 'YYYY-MM-DD' string format
+    date_push=date.strftime('%Y-%m-%d')
+    #save the returns to a csv file in backtest_results folder
+    returns_df.to_csv(f'backtest_results/returns_{date_push}.csv')
+    
+    #push the data to the mongo db
+    #make dictionary of the returns_df
+    returns_df_dict=returns_df.to_dict()
+    row_mongo={'date':date,'returns_df':returns_df_dict,'total_return':returns_df['weighted_return'].sum()/100}
+    #add the row to the mongo db
+    collection2.insert_one(row_mongo)
+
     print(returns_df)
 
     print(returns_df['weighted_return'].sum()/100)
@@ -678,7 +720,7 @@ def wealth_wave(date,final_env):
     print('Portfolio created successfully!\n')
 
     print('Backtesting Portfolio...\n')
-    returns=backtest_portfolio(maxSR_portfolio_stocks)
+    returns=backtest_portfolio(maxSR_portfolio_stocks,date)
     print('Backtesting completed successfully!\n')
 
     print('Wealth Wave completed successfully!\n')
@@ -718,16 +760,35 @@ trade_log['returns']=trade_log['returns']/100
 #cumulative product of the returns
 trade_log['comp_returns']=trade_log['returns'].cumprod()
 print(trade_log)
+#add percentage change of the comp_returns
+trade_log['comp_returns_pct']=trade_log['comp_returns'].pct_change()
+#calculate the std of the comp_returns
+std=trade_log['comp_returns_pct'].std()
+#calculate the annualized std
+std=std*np.sqrt(12)
+#calculate the annualized returns
+annualized_returns=(trade_log['comp_returns'].iloc[-1]-1)
+#sharpe ratio
+sharpe_ratio=(annualized_returns-0.07)/std
+
+print('Annualized Returns:',annualized_returns)
+print('Annualized Std:',std)
+print('Sharpe Ratio:',sharpe_ratio)
+
+#add the annualized returns, std and sharpe ratio to the trade log
+trade_log['annualized_returns']=annualized_returns
+trade_log['annualized_std']=std
+trade_log['sharpe_ratio']=sharpe_ratio
 
 #plot the returns
 plt.plot(trade_log['date'],trade_log['comp_returns'])
 plt.xlabel('Date')
 plt.ylabel('Returns')
 plt.title('Wealth Wave Returns')
-#save the plot
-plt.savefig('Wealth_Wave_Returns.png')
-plt.show()
+#save the plot in trade_log folder
+plt.savefig('trade_log/Wealth_Wave_Returns.png')
 
-#save the trade log to a csv file
-trade_log.to_csv('trade_log.csv')
+#save the trade log to a csv file in trade_log folder
+trade_log.to_csv('trade_log/trade_log.csv')
+
 print('Trade log saved to trade_log.csv')
